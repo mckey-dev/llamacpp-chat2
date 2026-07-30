@@ -226,6 +226,7 @@ def do_download_model(
     model_id: str,
     repo_url: str,
     filename: str,
+    mmproj_filename: str = "",
     overwrite: bool = False,
 ) -> tuple[list[str], list[str], str]:
     """モデルをダウンロードし、一覧を更新する。
@@ -245,19 +246,61 @@ def do_download_model(
     mid = (model_id or "").strip()
     url = (repo_url or "").strip()
     fname = (filename or "").strip()
+    mmproj = (mmproj_filename or "").strip()
     if not mid or not url or not fname:
         return [], [], format_error(
-            "タイトル（ID）・URL（リポジトリ）・ファイル名をすべて入力してください。"
+            "タイトル（ID）・リポジトリ・LLMモデルをすべて入力してください。"
         )
     try:
         raw = make_control_client(cfg).download_model(
-            mid, url, fname, overwrite=bool(overwrite)
+            mid,
+            url,
+            fname,
+            mmproj_filename=mmproj or None,
+            overwrite=bool(overwrite),
         )
         models, mmprojs, list_msg = do_list_models(
             inference_url, control_url, token, ngl, ctx, timeout_sec
         )
         detail = json.dumps(raw, ensure_ascii=False, indent=2)
         return models, mmprojs, f"ダウンロード完了\n{detail}\n{list_msg}"
+    except ControlClientError as e:
+        return [], [], str(e)
+
+
+def do_delete_model(
+    inference_url: str,
+    control_url: str,
+    token: str,
+    ngl: float | int,
+    ctx: float | int,
+    timeout_sec: float,
+    model_id: str,
+) -> tuple[list[str], list[str], str]:
+    """カタログからモデルを削除し、一覧を更新する。
+
+    Returns
+    -------
+    models : list of str
+        モデル Dropdown 用。
+    mmprojs : list of str
+        mmproj Dropdown 用。
+    message : str
+        結果ログ。
+    """
+    cfg = cfg_from_inputs(
+        inference_url, control_url, token, ngl, ctx, timeout_sec
+    )
+    mid = (model_id or "").strip()
+    if not mid:
+        return [], [], format_error("削除するモデルを選択してください。")
+    try:
+        raw = make_control_client(cfg).delete_model(mid, delete_file=True)
+        models, mmprojs, list_msg = do_list_models(
+            inference_url, control_url, token, ngl, ctx, timeout_sec
+        )
+        detail = json.dumps(raw, ensure_ascii=False, indent=2)
+        return models, mmprojs, f"削除完了\n{detail}\n{list_msg}"
     except ControlClientError as e:
         return [], [], str(e)
 
@@ -504,6 +547,7 @@ def download_and_refresh(
     model_id: str,
     repo_url: str,
     filename: str,
+    mmproj_filename: str,
     overwrite: bool,
 ):
     """ダウンロード後に Dropdown を更新する。
@@ -527,9 +571,49 @@ def download_and_refresh(
         model_id,
         repo_url,
         filename,
+        mmproj_filename=mmproj_filename,
         overwrite=bool(overwrite),
     )
     if "ダウンロード完了" not in msg:
+        return gr.update(), gr.update(), msg
+    mmproj_choices = [""] + mmprojs
+    return (
+        gr.update(choices=models, value=(models[0] if models else None)),
+        gr.update(choices=mmproj_choices, value=""),
+        msg,
+    )
+
+
+def delete_and_refresh(
+    inference_url: str,
+    control_url: str,
+    token: str,
+    ngl: float | int,
+    ctx: float | int,
+    timeout_sec: float,
+    model_id: str,
+):
+    """削除後に Dropdown を更新する。
+
+    Returns
+    -------
+    update
+        モデル Dropdown。
+    update
+        mmproj Dropdown。
+    str
+        ログ。
+    """
+    models, mmprojs, msg = do_delete_model(
+        inference_url,
+        control_url,
+        token,
+        ngl,
+        ctx,
+        timeout_sec,
+        model_id,
+    )
+    if "削除完了" not in msg:
         return gr.update(), gr.update(), msg
     mmproj_choices = [""] + mmprojs
     return (

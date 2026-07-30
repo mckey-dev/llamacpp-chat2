@@ -5,6 +5,7 @@
 - ``GET  /v1/control/status``
 - ``GET  /v1/control/models``
 - ``POST /v1/control/models/download``
+- ``POST /v1/control/models/delete``
 - ``POST /v1/control/load`` / ``unload`` / ``restart`` / ``start`` / ``stop``
 """
 
@@ -21,6 +22,7 @@ from urllib.parse import urlparse
 from server.models_catalog import (
     CatalogError,
     default_models_dir,
+    delete_model,
     download_model,
     list_models_with_status,
 )
@@ -139,12 +141,22 @@ def make_handler(state: ControlState):
             try:
                 body = self._read_json()
                 if path == "/v1/control/models/download":
+                    mmproj_fn = str(body.get("mmproj_filename") or "").strip()
                     result = download_model(
                         state.models_dir,
                         model_id=str(body.get("id") or ""),
                         url=str(body.get("url") or ""),
                         filename=str(body.get("filename") or ""),
+                        mmproj_filename=mmproj_fn or None,
                         overwrite=bool(body.get("overwrite", False)),
+                    )
+                    self._send_json(200, result)
+                    return
+                if path == "/v1/control/models/delete":
+                    result = delete_model(
+                        state.models_dir,
+                        str(body.get("id") or ""),
+                        delete_file=bool(body.get("delete_file", True)),
                     )
                     self._send_json(200, result)
                     return

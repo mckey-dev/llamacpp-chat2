@@ -135,9 +135,51 @@ def sanitize_filename(filename: str) -> str:
     return base
 
 
+def normalize_repo_url(repo: str) -> str:
+    """リポジトリ指定を http(s) URL に正規化する。
+
+    - ``org/repo`` → ``https://huggingface.co/org/repo``
+    - 既に ``http://`` / ``https://`` → そのまま
+
+    Parameters
+    ----------
+    repo : str
+        リポジトリ URL または Hugging Face の ``org/repo``。
+
+    Returns
+    -------
+    str
+        正規化後の URL。
+
+    Raises
+    ------
+    CatalogError
+        空または不正な形式。
+    """
+    u = (repo or "").strip()
+    if not u:
+        raise CatalogError("リポジトリが空です")
+    parsed = urlparse(u)
+    if parsed.scheme in ("http", "https"):
+        return u
+    # スキームなし
+    if "://" not in u and "/" in u.strip("/"):
+        parts = [p for p in u.strip("/").split("/") if p]
+        # huggingface.co/org/repo （スキーム忘れ）
+        if len(parts) >= 3 and "huggingface.co" in parts[0].lower():
+            return f"https://{parts[0]}/{parts[1]}/{parts[2]}"
+        # org/repo
+        if len(parts) >= 2 and all(parts[:2]):
+            return f"https://huggingface.co/{parts[0]}/{parts[1]}"
+    raise CatalogError(
+        "リポジトリは https URL、または Hugging Face の org/repo 形式で指定してください"
+    )
+
+
 def resolve_download_url(url: str, filename: str) -> str:
     """リポジトリ URL とファイル名から実ダウンロード URL を決める。
 
+    - ``org/repo`` は Hugging Face URL に正規化してから解決
     - 末尾がファイル名、または ``.gguf`` / ``.bin`` 等で終わる直接 URL → そのまま
     - Hugging Face の ``/org/repo`` または ``/org/repo/tree/...`` →
       ``.../resolve/main/{filename}``
@@ -145,7 +187,7 @@ def resolve_download_url(url: str, filename: str) -> str:
     Parameters
     ----------
     url : str
-        リポジトリまたはファイル URL。
+        リポジトリ（URL または ``org/repo``）またはファイル URL。
     filename : str
         保存ファイル名。
 
@@ -154,13 +196,8 @@ def resolve_download_url(url: str, filename: str) -> str:
     str
         ダウンロード URL。
     """
-    u = (url or "").strip()
-    if not u:
-        raise CatalogError("url が空です")
+    u = normalize_repo_url(url)
     parsed = urlparse(u)
-    if parsed.scheme not in ("http", "https"):
-        raise CatalogError("url は http または https である必要があります")
-
     path = parsed.path or ""
     if path.rstrip("/").endswith("/" + filename) or path.endswith(filename):
         return u
@@ -253,10 +290,11 @@ def download_model(
     model_id: str,
     url: str,
     filename: str,
+    mmproj_filename: Optional[str] = None,
     overwrite: bool = False,
     timeout_sec: float = 3600.0,
 ) -> dict[str, Any]:
-    """モデルをダウンロードしてカタログに登録する。
+    """LLM（と任意の Vision/mmproj）をダウンロードしてカタログに登録する。
 
     Parameters
     ----------
@@ -265,13 +303,15 @@ def download_model(
     model_id : str
         タイトル（ID）。
     url : str
-        リポジトリまたはファイル URL。
+        リポジトリ（URL または ``org/repo``）。
     filename : str
-        保存ファイル名。
+        LLM モデルの保存ファイル名。
+    mmproj_filename : str or None, default None
+        Vision（mmproj）ファイル名。空なら取得しない。
     overwrite : bool, default False
-        同一 id の上書きを許すか。
+        同一 id / 同名ファイルの上書きを許すか。
     timeout_sec : float, default 3600.0
-        ダウンロード全体のタイムアウト秒。
+        各ファイルのダウンロードタイムアウト秒。
 
     Returns
     -------
@@ -281,29 +321,156 @@ def download_model(
     ensure_models_dir(models_dir)
     fname = sanitize_filename(filename)
     mid = (model_id or "").strip()
-    u = (url or "").strip()
+    repo = normalize_repo_url(url)
     if not mid:
         raise CatalogError("id が空です")
-    if not u:
-        raise CatalogError("url が空です")
+
+    mmproj_name = (mmproj_filename or "").strip()
+    mmproj_fname = sanitize_filename(mmproj_name) if mmproj_name else None
+    mmproj_id = f"{mid} mmproj" if mmproj_fname else None
 
     catalog = load_catalog(models_dir)
-    exists = any(m["id"] == mid for m in catalog["models"])
-    if exists and not overwrite:
+    ids = {m["id"] for m in catalog["models"]}
+    if mid in ids and not overwrite:
         raise CatalogError(
             f"id が既に存在します: {mid}（overwrite=true で上書き可）",
+            status=409,
+        )
+    if mmproj_id and mmproj_id in ids and not overwrite:
+        raise CatalogError(
+            f"id が既に存在します: {mmproj_id}（overwrite=true で上書き可）",
             status=409,
         )
 
     dest = models_dir / fname
     if dest.is_file() and not overwrite:
-        # 別 id で同名ファイルがある場合も拒否
         raise CatalogError(
             f"ファイルが既に存在します: {fname}（overwrite=true で上書き可）",
             status=409,
         )
+    mmproj_dest: Optional[Path] = None
+    if mmproj_fname:
+        mmproj_dest = models_dir / mmproj_fname
+        if mmproj_dest.is_file() and not overwrite:
+            raise CatalogError(
+                f"ファイルが既に存在します: {mmproj_fname}"
+                "（overwrite=true で上書き可）",
+                status=409,
+            )
 
-    dl_url = resolve_download_url(u, fname)
+    dl_url = _download_file(
+        dest, resolve_download_url(repo, fname), timeout_sec=timeout_sec
+    )
+    entry = upsert_entry(
+        models_dir,
+        model_id=mid,
+        url=repo,
+        filename=fname,
+        overwrite=True,
+    )
+    result: dict[str, Any] = {
+        "ok": True,
+        "model": entry,
+        "path": str(dest),
+        "download_url": dl_url,
+    }
+
+    if mmproj_fname and mmproj_dest is not None and mmproj_id is not None:
+        mm_dl = _download_file(
+            mmproj_dest,
+            resolve_download_url(repo, mmproj_fname),
+            timeout_sec=timeout_sec,
+        )
+        mm_entry = upsert_entry(
+            models_dir,
+            model_id=mmproj_id,
+            url=repo,
+            filename=mmproj_fname,
+            overwrite=True,
+        )
+        result["mmproj"] = mm_entry
+        result["mmproj_path"] = str(mmproj_dest)
+        result["mmproj_download_url"] = mm_dl
+
+    return result
+
+
+def delete_model(
+    models_dir: Path,
+    model_id: str,
+    *,
+    delete_file: bool = True,
+) -> dict[str, Any]:
+    """カタログからモデルを削除し、任意で実ファイルも消す。
+
+    Parameters
+    ----------
+    models_dir : pathlib.Path
+        モデル一時ディレクトリ。
+    model_id : str
+        削除するエントリ ID。
+    delete_file : bool, default True
+        実ファイルも削除するか。
+
+    Returns
+    -------
+    dict
+        削除結果。
+
+    Raises
+    ------
+    CatalogError
+        id が空、またはカタログに無い。
+    """
+    mid = (model_id or "").strip()
+    if not mid:
+        raise CatalogError("id が空です")
+
+    catalog = load_catalog(models_dir)
+    models: list[dict[str, str]] = list(catalog["models"])
+    idx = next((i for i, m in enumerate(models) if m["id"] == mid), None)
+    if idx is None:
+        raise CatalogError(f"モデルが見つかりません: {mid}", status=404)
+
+    entry = models[idx]
+    # ファイル削除に失敗したらカタログは触らない（不整合防止）
+    removed_path: Optional[str] = None
+    if delete_file:
+        fpath = models_dir / entry["filename"]
+        if fpath.is_file():
+            try:
+                fpath.unlink()
+                removed_path = str(fpath)
+            except OSError as e:
+                raise CatalogError(
+                    f"ファイル削除に失敗: {fpath}: {e}", status=500
+                ) from e
+
+    models.pop(idx)
+    catalog["models"] = models
+    save_catalog(models_dir, catalog)
+
+    return {
+        "ok": True,
+        "deleted": entry,
+        "file_removed": removed_path,
+        "message": f"削除しました: {mid}",
+    }
+
+
+def _download_file(
+    dest: Path,
+    dl_url: str,
+    *,
+    timeout_sec: float,
+) -> str:
+    """URL から dest へファイルを保存する。
+
+    Returns
+    -------
+    str
+        実際に使ったダウンロード URL。
+    """
     tmp = dest.with_suffix(dest.suffix + ".partial")
     try:
         req = Request(
@@ -332,20 +499,7 @@ def download_model(
     finally:
         if tmp.exists() and not dest.exists():
             _remove_quiet(tmp)
-
-    entry = upsert_entry(
-        models_dir,
-        model_id=mid,
-        url=u,
-        filename=fname,
-        overwrite=True,
-    )
-    return {
-        "ok": True,
-        "model": entry,
-        "path": str(dest),
-        "download_url": dl_url,
-    }
+    return dl_url
 
 
 def _remove_quiet(path: Path) -> None:

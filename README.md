@@ -32,7 +32,7 @@
 
 - **Connection**
   - チャット用 URL（llama-server）とモデル操作 URL（制御API）、制御トークン
-  - status / モデル一覧 / モデル追加（id・url・filename ダウンロード）
+  - status / モデル一覧 / モデル追加（リポジトリ・LLM・任意 Vision）・一覧削除
   - Load / Unload / Restart（ngl・ctx、任意 mmproj）
 - **Chat**
   - OpenAI 互換ストリーミング
@@ -45,7 +45,7 @@
 
 ## 前提
 
-- Python 3.10+
+- Python **3.10–3.13**（Gradio 4.40。3.14 は非対応）
 - サーバー側に **CUDA 対応の `llama-server`**（[llama.cpp](https://github.com/ggml-org/llama.cpp) をビルド）
 - GPU 推奨（Paperspace / Colab / ローカル）
 
@@ -140,6 +140,7 @@ Colab は **ランタイム → GPU** を選択してください。ランタイ
 | GET | `/v1/control/status` |
 | GET | `/v1/control/models` |
 | POST | `/v1/control/models/download` |
+| POST | `/v1/control/models/delete` |
 | POST | `/v1/control/load` / `unload` / `restart` |
 
 ---

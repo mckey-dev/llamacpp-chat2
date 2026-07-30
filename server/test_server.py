@@ -21,8 +21,10 @@ if str(ROOT) not in sys.path:
 from server.control_api import ControlState, make_handler  # noqa: E402
 from server.models_catalog import (  # noqa: E402
     CatalogError,
+    delete_model,
     download_model,
     list_models_with_status,
+    normalize_repo_url,
     resolve_download_url,
     save_catalog,
     upsert_entry,
@@ -47,6 +49,19 @@ class ModelsCatalogTests(unittest.TestCase):
         url = "https://huggingface.co/org/repo"
         got = resolve_download_url(url, "model-Q4.gguf")
         self.assertIn("/org/repo/resolve/main/model-Q4.gguf", got)
+
+    def test_normalize_repo_url_org_repo(self) -> None:
+        got = normalize_repo_url("huihui-ai/Some-GGUF")
+        self.assertEqual("https://huggingface.co/huihui-ai/Some-GGUF", got)
+
+    def test_normalize_repo_url_host_without_scheme(self) -> None:
+        got = normalize_repo_url("huggingface.co/org/repo")
+        self.assertEqual("https://huggingface.co/org/repo", got)
+
+    def test_resolve_download_url_org_repo_short(self) -> None:
+        got = resolve_download_url("org/repo", "model-Q4.gguf")
+        self.assertIn("/org/repo/resolve/main/model-Q4.gguf", got)
+        self.assertTrue(got.startswith("https://huggingface.co/"))
 
     def test_resolve_download_url_direct(self) -> None:
         url = "https://example.com/files/foo.gguf"
@@ -79,6 +94,62 @@ class ModelsCatalogTests(unittest.TestCase):
                 url="https://example.com/r2",
                 filename="b.gguf",
             )
+
+    def test_download_with_mmproj(self) -> None:
+        from unittest import mock
+
+        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float) -> str:
+            dest.write_bytes(b"GGUF")
+            return dl_url
+
+        with mock.patch(
+            "server.models_catalog._download_file", side_effect=fake_download
+        ):
+            result = download_model(
+                self.models_dir,
+                model_id="Foo",
+                url="org/repo",
+                filename="Foo-Q4.gguf",
+                mmproj_filename="mmproj-model.gguf",
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual("Foo", result["model"]["id"])
+        self.assertEqual(
+            "https://huggingface.co/org/repo", result["model"]["url"]
+        )
+        self.assertEqual("Foo mmproj", result["mmproj"]["id"])
+        self.assertTrue((self.models_dir / "Foo-Q4.gguf").is_file())
+        self.assertTrue((self.models_dir / "mmproj-model.gguf").is_file())
+        items = list_models_with_status(self.models_dir)
+        self.assertEqual(2, len(items))
+
+    def test_delete_model_removes_file(self) -> None:
+        path = self.models_dir / "gone.gguf"
+        path.write_bytes(b"GGUF")
+        upsert_entry(
+            self.models_dir,
+            model_id="Gone",
+            url="https://example.com/r",
+            filename="gone.gguf",
+            overwrite=True,
+        )
+        result = delete_model(self.models_dir, "Gone", delete_file=True)
+        self.assertTrue(result["ok"])
+        self.assertFalse(path.exists())
+        self.assertEqual([], list_models_with_status(self.models_dir))
+
+    def test_delete_model_catalog_only_when_missing(self) -> None:
+        upsert_entry(
+            self.models_dir,
+            model_id="Missing",
+            url="https://example.com/r",
+            filename="no-file.gguf",
+            overwrite=True,
+        )
+        result = delete_model(self.models_dir, "Missing", delete_file=True)
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["file_removed"])
+        self.assertEqual([], list_models_with_status(self.models_dir))
 
 
 class ProcessManagerTests(unittest.TestCase):
@@ -204,6 +275,7 @@ class ControlApiHttpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.pm.unload()
         self.server.shutdown()
+        self.server.server_close()
         self.thread.join(timeout=5)
         self.tmp.cleanup()
 
@@ -270,6 +342,46 @@ class ControlApiHttpTests(unittest.TestCase):
             self.assertFalse(body["llama_running"])
         finally:
             ProcessManager._build_command = original  # type: ignore[method-assign]
+
+    def test_download_with_mmproj_via_http(self) -> None:
+        from unittest import mock
+
+        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float) -> str:
+            dest.write_bytes(b"GGUF")
+            return dl_url
+
+        with mock.patch(
+            "server.models_catalog._download_file", side_effect=fake_download
+        ):
+            code, body = self._request(
+                "POST",
+                "/v1/control/models/download",
+                {
+                    "id": "Vis",
+                    "url": "org/repo",
+                    "filename": "vis-Q4.gguf",
+                    "mmproj_filename": "mmproj.gguf",
+                },
+            )
+        self.assertEqual(200, code)
+        self.assertTrue(body["ok"])
+        self.assertEqual("Vis mmproj", body["mmproj"]["id"])
+        self.assertIn("huggingface.co/org/repo", body["model"]["url"])
+
+    def test_delete_via_http(self) -> None:
+        model_path = self.models_dir / "demo.gguf"
+        self.assertTrue(model_path.is_file())
+        code, body = self._request(
+            "POST",
+            "/v1/control/models/delete",
+            {"id": "Demo", "delete_file": True},
+        )
+        self.assertEqual(200, code)
+        self.assertTrue(body["ok"])
+        code, body = self._request("GET", "/v1/control/models")
+        self.assertEqual(200, code)
+        self.assertEqual([], body["models"])
+        self.assertFalse(model_path.exists())
 
 
 if __name__ == "__main__":

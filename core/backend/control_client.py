@@ -5,7 +5,8 @@
 - ヘッダ ``X-Control-Token``
 - ``GET  /v1/control/status``
 - ``GET  /v1/control/models``
-- ``POST /v1/control/models/download`` （body: id, url, filename）
+- ``POST /v1/control/models/download`` （body: id, url, filename, 任意 mmproj_filename）
+- ``POST /v1/control/models/delete`` （body: id, delete_file）
 - ``POST /v1/control/load`` （body: model, ngl, ctx, 任意 mmproj）
 - ``POST /v1/control/unload``
 - ``POST /v1/control/restart``
@@ -209,6 +210,7 @@ class ControlClient:
         url: str,
         filename: str,
         *,
+        mmproj_filename: Optional[str] = None,
         overwrite: bool = False,
         timeout_sec: Optional[float] = None,
     ) -> dict[str, Any]:
@@ -219,9 +221,11 @@ class ControlClient:
         model_id : str
             タイトル（ID）。
         url : str
-            リポジトリまたはファイル URL。
+            リポジトリ（URL または Hugging Face ``org/repo``）。
         filename : str
-            保存ファイル名。
+            LLM モデルの保存ファイル名。
+        mmproj_filename : str or None, default None
+            Vision（mmproj）ファイル名。空なら取得しない。
         overwrite : bool, default False
             同一 id / 同名ファイルの上書き。
         timeout_sec : float or None
@@ -235,16 +239,46 @@ class ControlClient:
         to = timeout_sec
         if to is None:
             to = max(float(self.timeout_sec), 3600.0)
+        body: dict[str, Any] = {
+            "id": model_id,
+            "url": url,
+            "filename": filename,
+            "overwrite": overwrite,
+        }
+        mm = (mmproj_filename or "").strip()
+        if mm:
+            body["mmproj_filename"] = mm
         return self._request(
             "POST",
             "/v1/control/models/download",
-            json_body={
-                "id": model_id,
-                "url": url,
-                "filename": filename,
-                "overwrite": overwrite,
-            },
+            json_body=body,
             timeout_sec=to,
+        )
+
+    def delete_model(
+        self,
+        model_id: str,
+        *,
+        delete_file: bool = True,
+    ) -> dict[str, Any]:
+        """カタログからモデルを削除する（任意で実ファイルも）。
+
+        Parameters
+        ----------
+        model_id : str
+            削除するエントリ ID。
+        delete_file : bool, default True
+            実ファイルも削除するか。
+
+        Returns
+        -------
+        dict
+            サーバー応答。
+        """
+        return self._request(
+            "POST",
+            "/v1/control/models/delete",
+            json_body={"id": model_id, "delete_file": delete_file},
         )
 
     def load(

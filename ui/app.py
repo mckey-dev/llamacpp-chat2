@@ -116,17 +116,23 @@ def build_ui(config_path: Path | None = None) -> gr.Blocks:
                 with gr.Row():
                     model_id_in = gr.Textbox(
                         label="タイトル（ID）",
-                        placeholder="Foo Q4_K_M",
+                        placeholder="Foo Q4_K",
                         scale=1,
                     )
                     model_url_in = gr.Textbox(
-                        label="URL（リポジトリ）",
-                        placeholder="https://huggingface.co/org/repo",
+                        label="リポジトリ",
+                        placeholder="org/repo または https://huggingface.co/...",
                         scale=2,
                     )
+                with gr.Row():
                     model_filename_in = gr.Textbox(
-                        label="ファイル名",
-                        placeholder="Foo-Q4_K_M.gguf",
+                        label="LLMモデル",
+                        placeholder="Foo-Q4_K.gguf",
+                        scale=1,
+                    )
+                    model_mmproj_in = gr.Textbox(
+                        label="Visionモデル",
+                        placeholder="mmproj-model-bf16.gguf（任意・空可）",
                         scale=1,
                     )
                 with gr.Row():
@@ -137,18 +143,28 @@ def build_ui(config_path: Path | None = None) -> gr.Blocks:
                         "ダウンロード", variant="secondary"
                     )
 
-                model_dd = gr.Dropdown(
-                    label="モデル（GGUF）",
-                    choices=[],
-                    value=None,
-                    allow_custom_value=True,
-                )
-                mmproj_dd = gr.Dropdown(
-                    label="mmproj（任意・空＝ネイティブ Vision / テキスト専用）",
-                    choices=[""],
-                    value="",
-                    allow_custom_value=True,
-                )
+                with gr.Row():
+                    model_dd = gr.Dropdown(
+                        label="モデル（GGUF）",
+                        choices=[],
+                        value=None,
+                        allow_custom_value=True,
+                        scale=3,
+                    )
+                    btn_delete_model = gr.Button(
+                        "リストから削除", variant="stop", scale=1
+                    )
+                with gr.Row():
+                    mmproj_dd = gr.Dropdown(
+                        label="mmproj（任意・空＝ネイティブ Vision / テキスト専用）",
+                        choices=[""],
+                        value="",
+                        allow_custom_value=True,
+                        scale=3,
+                    )
+                    btn_delete_mmproj = gr.Button(
+                        "Visionを削除", variant="stop", scale=1
+                    )
                 with gr.Row():
                     btn_load = gr.Button("Load", variant="primary")
                     btn_unload = gr.Button("Unload / Stop")
@@ -184,8 +200,19 @@ def build_ui(config_path: Path | None = None) -> gr.Blocks:
                         model_id_in,
                         model_url_in,
                         model_filename_in,
+                        model_mmproj_in,
                         model_overwrite,
                     ],
+                    outputs=[model_dd, mmproj_dd, log],
+                )
+                btn_delete_model.click(
+                    fn=C.delete_and_refresh,
+                    inputs=conn_inputs + [model_dd],
+                    outputs=[model_dd, mmproj_dd, log],
+                )
+                btn_delete_mmproj.click(
+                    fn=C.delete_and_refresh,
+                    inputs=conn_inputs + [mmproj_dd],
                     outputs=[model_dd, mmproj_dd, log],
                 )
                 btn_load.click(
