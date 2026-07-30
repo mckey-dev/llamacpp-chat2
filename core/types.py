@@ -36,10 +36,13 @@ class ChatChunk:
         追加テキスト。
     done : bool, default False
         ストリーム終了なら True。
+    tok_s : float or None, default None
+        生成速度（tokens/sec）。終了チャンクで付くことがある。
     """
 
     text: str
     done: bool = False
+    tok_s: Optional[float] = None
 
 
 @dataclass
@@ -94,6 +97,10 @@ class ServerStatus:
         生 JSON。
     message : str
         付加メッセージ。
+    vram_used_gb : float or None
+        使用中 VRAM（GB）。
+    vram_total_gb : float or None
+        総 VRAM（GB）。
     """
 
     ok: bool
@@ -103,6 +110,8 @@ class ServerStatus:
     log_tail: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
     message: str = ""
+    vram_used_gb: Optional[float] = None
+    vram_total_gb: Optional[float] = None
 
 
 @dataclass
@@ -126,6 +135,8 @@ class ConnectionConfig:
         通常リクエストのタイムアウト秒。
     stream_timeout_sec : float
         ストリーム全体のタイムアウト秒。
+    image_max_long_edge : int
+        チャット送信時の画像長い辺上限（px）。0 以下で無制限。
     """
 
     inference_base_url: str = "http://127.0.0.1:8080"
@@ -135,3 +146,4 @@ class ConnectionConfig:
     ctx: int = 8192
     timeout_sec: float = 60.0
     stream_timeout_sec: float = 300.0
+    image_max_long_edge: int = 1024

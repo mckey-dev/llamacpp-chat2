@@ -6,6 +6,7 @@
 - ``GET  /v1/control/status``
 - ``GET  /v1/control/models``
 - ``POST /v1/control/models/download`` （body: id, url, filename, 任意 mmproj_filename）
+- ``GET  /v1/control/models/download/progress``
 - ``POST /v1/control/models/delete`` （body: id, delete_file）
 - ``POST /v1/control/load`` （body: model, ngl, ctx, 任意 mmproj）
 - ``POST /v1/control/unload``
@@ -153,6 +154,8 @@ class ControlClient:
             状態。
         """
         raw = self._request("GET", "/v1/control/status")
+        used = raw.get("vram_used_gb")
+        total = raw.get("vram_total_gb")
         return ServerStatus(
             ok=bool(raw.get("ok", True)),
             llama_running=bool(
@@ -163,6 +166,8 @@ class ControlClient:
             log_tail=str(raw.get("log_tail") or raw.get("log") or ""),
             raw=raw,
             message=str(raw.get("message") or ""),
+            vram_used_gb=float(used) if used is not None else None,
+            vram_total_gb=float(total) if total is not None else None,
         )
 
     def list_models(self) -> list[ModelInfo]:
@@ -253,6 +258,20 @@ class ControlClient:
             "/v1/control/models/download",
             json_body=body,
             timeout_sec=to,
+        )
+
+    def download_progress(self) -> dict[str, Any]:
+        """モデルダウンロードの進捗を取得する。
+
+        Returns
+        -------
+        dict
+            ``active`` / ``percent`` / ``downloaded`` / ``total`` 等。
+        """
+        return self._request(
+            "GET",
+            "/v1/control/models/download/progress",
+            timeout_sec=min(float(self.timeout_sec), 10.0),
         )
 
     def delete_model(

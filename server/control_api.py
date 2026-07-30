@@ -4,6 +4,7 @@
 
 - ``GET  /v1/control/status``
 - ``GET  /v1/control/models``
+- ``GET  /v1/control/models/download/progress``
 - ``POST /v1/control/models/download``
 - ``POST /v1/control/models/delete``
 - ``POST /v1/control/load`` / ``unload`` / ``restart`` / ``start`` / ``stop``
@@ -24,6 +25,7 @@ from server.models_catalog import (
     default_models_dir,
     delete_model,
     download_model,
+    get_download_progress,
     list_models_with_status,
 )
 from server.process_manager import (
@@ -119,6 +121,10 @@ def make_handler(state: ControlState):
                             "models_dir": str(state.models_dir),
                         },
                     )
+                    return
+                if path == "/v1/control/models/download/progress":
+                    prog = get_download_progress()
+                    self._send_json(200, {"ok": True, **prog})
                     return
                 self._send_json(404, {"ok": False, "error": "not found"})
             except CatalogError as e:

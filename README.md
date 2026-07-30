@@ -32,11 +32,12 @@
 
 - **Connection**
   - チャット用 URL（llama-server）とモデル操作 URL（制御API）、制御トークン
-  - status / モデル一覧 / モデル追加（リポジトリ・LLM・任意 Vision）・一覧削除
+  - status / モデル一覧 / モデル追加（リポジトリ・LLM・任意 Vision・進捗表示）・一覧削除
   - Load / Unload / Restart（ngl・ctx、任意 mmproj）
 - **Chat**
   - OpenAI 互換ストリーミング
-  - 画像添付（ネイティブ Vision / mmproj 分離型の両方）
+  - 画像添付（ネイティブ Vision / mmproj 分離型の両方）。送信時に長い辺が上限（既定 1024px）を超える画像は縮小
+  - メトリクス: 使用中/総 VRAM（GB）と返答時の tok/s
 - **Vision**
   - ネイティブ統合 GGUF … mmproj **なし** で Load
   - mmproj 分離型 … 本体 + 任意 mmproj で Load
@@ -140,6 +141,7 @@ Colab は **ランタイム → GPU** を選択してください。ランタイ
 | GET | `/v1/control/status` |
 | GET | `/v1/control/models` |
 | POST | `/v1/control/models/download` |
+| GET | `/v1/control/models/download/progress` |
 | POST | `/v1/control/models/delete` |
 | POST | `/v1/control/load` / `unload` / `restart` |
 
@@ -156,6 +158,7 @@ Colab は **ランタイム → GPU** を選択してください。ランタイ
 | `LLAMACPP_CHAT2_LLAMA_HOST` / `_PORT` | 推論バインド（既定 127.0.0.1:8080） |
 | `GRADIO_SHARE` | `True` で Public URL（Notebook 既定。ローカル setup は `False`） |
 | `GRADIO_SERVER_NAME` / `_PORT` | Gradio バインド |
+| `LLAMACPP_CHAT2_IMAGE_MAX_LONG_EDGE` | チャット送信時の画像長い辺上限 px（設定 JSON 未指定時。既定 1024） |
 
 ---
 

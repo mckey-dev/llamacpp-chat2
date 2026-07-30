@@ -27,6 +27,20 @@ class HttpBackendError(Exception):
         self.timeout = timeout
 
 
+def _tok_s_from_obj(obj: dict[str, Any]) -> Optional[float]:
+    """応答 JSON から predicted_per_second を取り出す。"""
+    timings = obj.get("timings")
+    if not isinstance(timings, dict):
+        return None
+    val = timings.get("predicted_per_second")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 class HttpBackend:
     """llama-server へのチャット／ヘルスチェッククライアント。
 
@@ -114,7 +128,7 @@ class HttpBackend:
         Yields
         ------
         ChatChunk
-            テキスト断片または終了印。
+            テキスト断片または終了印（``tok_s`` 付き可）。
 
         Raises
         ------
@@ -129,6 +143,7 @@ class HttpBackend:
             ],
             "stream": True,
             "temperature": temperature,
+            "stream_options": {"include_usage": True},
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
@@ -138,6 +153,7 @@ class HttpBackend:
         timeout = httpx.Timeout(
             self.stream_timeout_sec, connect=self.timeout_sec
         )
+        last_tok_s: Optional[float] = None
         try:
             with httpx.Client(timeout=timeout) as client:
                 with client.stream("POST", url, json=payload) as resp:
@@ -157,14 +173,20 @@ class HttpBackend:
                         if not data:
                             continue
                         if data == "[DONE]":
-                            yield ChatChunk(text="", done=True)
+                            yield ChatChunk(
+                                text="", done=True, tok_s=last_tok_s
+                            )
                             return
                         try:
                             obj = json.loads(data)
                         except json.JSONDecodeError:
                             continue
+                        tok = _tok_s_from_obj(obj)
+                        if tok is not None:
+                            last_tok_s = tok
                         choices = obj.get("choices") or []
                         if not choices:
+                            # usage / timings のみの最終チャンク
                             continue
                         delta = choices[0].get("delta") or {}
                         piece = delta.get("content") or ""
@@ -172,8 +194,10 @@ class HttpBackend:
                             yield ChatChunk(text=piece, done=False)
                         finish = choices[0].get("finish_reason")
                         if finish:
-                            yield ChatChunk(text="", done=True)
-                            return
+                            # timings が同チャンクにある場合は既に last_tok_s 更新済み
+                            # 続く usage チャンクや [DONE] で最終確定
+                            continue
+                    yield ChatChunk(text="", done=True, tok_s=last_tok_s)
         except httpx.TimeoutException as e:
             raise HttpBackendError(
                 str(e) or "stream タイムアウト", timeout=True

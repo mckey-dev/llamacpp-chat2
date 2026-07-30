@@ -34,6 +34,58 @@ STARTUP_WAIT_SEC = 2.0
 TERMINATE_TIMEOUT_SEC = 15.0
 
 
+def query_vram_gb(
+    *,
+    smi_runner: Optional[Any] = None,
+) -> Optional[tuple[float, float]]:
+    """nvidia-smi から VRAM 使用量/総量（GB）を取得する。
+
+    Parameters
+    ----------
+    smi_runner : callable or None
+        テスト用。``(cmd, **kwargs) -> CompletedProcess``。
+        省略時は ``subprocess.run``。
+
+    Returns
+    -------
+    tuple of float or None
+        ``(used_gb, total_gb)``。取得失敗時は None。
+    """
+    runner = smi_runner or subprocess.run
+    try:
+        proc = runner(
+            [
+                "nvidia-smi",
+                "--query-gpu=memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if getattr(proc, "returncode", 1) != 0:
+        return None
+    out = (getattr(proc, "stdout", None) or "").strip()
+    if not out:
+        return None
+    # 複数 GPU 時は先頭のみ
+    line = out.splitlines()[0].strip()
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 2:
+        return None
+    try:
+        used_mib = float(parts[0])
+        total_mib = float(parts[1])
+    except ValueError:
+        return None
+    if total_mib <= 0:
+        return None
+    return (used_mib / 1024.0, total_mib / 1024.0)
+
+
 @dataclass
 class LoadParams:
     """直近 load のパラメータ（restart 用）。"""
@@ -549,7 +601,14 @@ class ProcessManager:
                     "ctx": self._last_params.ctx,
                     "mmproj": self._last_params.mmproj,
                 }
-            return payload
+        vram = query_vram_gb()
+        if vram is not None:
+            payload["vram_used_gb"] = round(vram[0], 1)
+            payload["vram_total_gb"] = round(vram[1], 1)
+        else:
+            payload["vram_used_gb"] = None
+            payload["vram_total_gb"] = None
+        return payload
 
 
 def default_process_manager(models_dir: Path) -> ProcessManager:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -28,6 +29,42 @@ def default_config_path(root: Optional[PathLike] = None) -> Path:
     return base / "frontend-config.json"
 
 
+def _env_image_max_long_edge() -> Optional[int]:
+    """環境変数から画像長辺上限を読む。未設定なら None。"""
+    raw = os.environ.get("LLAMACPP_CHAT2_IMAGE_MAX_LONG_EDGE", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def resolve_image_max_long_edge(raw: Optional[dict[str, Any]] = None) -> int:
+    """画像長辺上限を解決する。
+
+    設定 JSON にキーがあればそれを使い、無ければ環境変数、
+    それも無ければ 1024。
+
+    Parameters
+    ----------
+    raw : dict or None
+        JSON 由来の辞書。
+
+    Returns
+    -------
+    int
+        長い辺の上限ピクセル。
+    """
+    data = raw or {}
+    if "image_max_long_edge" in data and data["image_max_long_edge"] is not None:
+        return int(data["image_max_long_edge"])
+    env_val = _env_image_max_long_edge()
+    if env_val is not None:
+        return env_val
+    return int(ConnectionConfig.image_max_long_edge)
+
+
 def load_config(path: Optional[PathLike] = None) -> ConnectionConfig:
     """接続設定を JSON から読み込む。
 
@@ -43,7 +80,7 @@ def load_config(path: Optional[PathLike] = None) -> ConnectionConfig:
     """
     p = Path(path) if path is not None else default_config_path()
     if not p.is_file():
-        return ConnectionConfig()
+        return ConnectionConfig(image_max_long_edge=resolve_image_max_long_edge())
     raw = json.loads(p.read_text(encoding="utf-8"))
     return config_from_dict(raw)
 
@@ -93,6 +130,7 @@ def config_to_dict(cfg: ConnectionConfig) -> dict[str, Any]:
         "ctx": cfg.ctx,
         "timeout_sec": cfg.timeout_sec,
         "stream_timeout_sec": cfg.stream_timeout_sec,
+        "image_max_long_edge": cfg.image_max_long_edge,
     }
 
 
@@ -123,4 +161,5 @@ def config_from_dict(raw: dict[str, Any]) -> ConnectionConfig:
         ctx=int(raw.get("ctx", 8192)),
         timeout_sec=float(raw.get("timeout_sec", 60.0)),
         stream_timeout_sec=float(raw.get("stream_timeout_sec", 300.0)),
+        image_max_long_edge=resolve_image_max_long_edge(raw),
     )

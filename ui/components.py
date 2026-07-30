@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any, Generator, Optional, Union
 
 import gradio as gr
@@ -120,6 +122,13 @@ def do_status(
                 model=st.loaded_model or "(なし)",
             )
         )
+        if (
+            st.vram_used_gb is not None
+            and st.vram_total_gb is not None
+        ):
+            lines.append(
+                f"VRAM: {st.vram_used_gb:.1f} / {st.vram_total_gb:.1f} GB"
+            )
         if st.message:
             lines.append(f"message: {st.message}")
         if st.exit_code is not None:
@@ -214,6 +223,45 @@ def do_list_models(
         return models, mmprojs, msg
     except ControlClientError as e:
         return [], [], str(e)
+
+
+def format_download_progress(prog: dict) -> str:
+    """ダウンロード進捗をログ用文字列にする。
+
+    Parameters
+    ----------
+    prog : dict
+        制御APIの progress 応答。
+
+    Returns
+    -------
+    str
+        進捗テキスト。
+    """
+    label = str(prog.get("label") or prog.get("filename") or "ダウンロード")
+    phase = str(prog.get("phase") or "")
+    message = str(prog.get("message") or "")
+    downloaded = int(prog.get("downloaded") or 0)
+    total = prog.get("total")
+    percent = prog.get("percent")
+
+    def _mb(n: float) -> str:
+        return f"{n / (1024 * 1024):.1f} MB"
+
+    lines = [f"【進捗】{label}"]
+    if message:
+        lines.append(message)
+    if isinstance(total, (int, float)) and total > 0 and percent is not None:
+        bar_len = 24
+        filled = max(0, min(bar_len, int(bar_len * float(percent) / 100.0)))
+        bar = "#" * filled + "-" * (bar_len - filled)
+        lines.append(f"[{bar}] {float(percent):.1f}%")
+        lines.append(f"{_mb(downloaded)} / {_mb(float(total))}")
+    else:
+        lines.append(f"{_mb(downloaded)} 受信中（合計サイズ不明）")
+    if phase:
+        lines.append(f"phase: {phase}")
+    return "\n".join(lines)
 
 
 def do_download_model(
@@ -364,7 +412,11 @@ def ctrl_action(
         return str(e)
 
 
-def history_to_messages(history: list) -> list[ChatMessage]:
+def history_to_messages(
+    history: list,
+    *,
+    max_long_edge: int = 1024,
+) -> list[ChatMessage]:
     """Gradio Chatbot 履歴をメッセージ列に変換する。
 
     Parameters
@@ -372,6 +424,8 @@ def history_to_messages(history: list) -> list[ChatMessage]:
     history : list
         ``[[user, assistant], ...]`` 形式。ユーザ側は文字列または
         ``(画像パス, キャプション)``。
+    max_long_edge : int, default 1024
+        画像の長い辺上限（送信時縮小）。
 
     Returns
     -------
@@ -387,7 +441,9 @@ def history_to_messages(history: list) -> list[ChatMessage]:
         if user:
             text, images = extract_user_turn(user)
             try:
-                content = build_user_content(text, images)
+                content = build_user_content(
+                    text, images, max_long_edge=int(max_long_edge)
+                )
             except (OSError, ValueError) as e:
                 content = text or str(e)
             if content:
@@ -431,6 +487,39 @@ def _parse_chat_input(message: ChatInput) -> tuple[str, list[str]]:
     return str(message).strip(), []
 
 
+def format_chat_metrics(
+    *,
+    vram_used_gb: float | None = None,
+    vram_total_gb: float | None = None,
+    tok_s: float | None = None,
+) -> str:
+    """Chat 用メトリクス 1 行を組み立てる。
+
+    Parameters
+    ----------
+    vram_used_gb : float or None
+        使用中 VRAM（GB）。
+    vram_total_gb : float or None
+        総 VRAM（GB）。
+    tok_s : float or None
+        生成速度。
+
+    Returns
+    -------
+    str
+        例: ``VRAM 8.2 / 24.0 GB · 42.3 tok/s``
+    """
+    if vram_used_gb is not None and vram_total_gb is not None:
+        vram = f"VRAM {vram_used_gb:.1f} / {vram_total_gb:.1f} GB"
+    else:
+        vram = "VRAM —"
+    if tok_s is not None:
+        speed = f"{tok_s:.1f} tok/s"
+    else:
+        speed = "— tok/s"
+    return f"{vram} · {speed}"
+
+
 def chat_respond(
     message: ChatInput,
     history: list,
@@ -441,34 +530,41 @@ def chat_respond(
     ctx: float | int,
     timeout_sec: float,
     temperature: float,
-) -> Generator[list, None, None]:
-    """チャット送信に応答し Chatbot 履歴を逐次 yield する。
+    image_max_long_edge: float | int = 1024,
+) -> Generator[tuple[list, str], None, None]:
+    """チャット送信に応答し Chatbot 履歴とメトリクスを逐次 yield する。
 
     Yields
     ------
-    list
+    history : list
         Gradio Chatbot 用履歴。
+    metrics : str
+        VRAM / tok/s 表示行。
     """
     history = list(history or [])
+    metrics = format_chat_metrics()
     text, files = _parse_chat_input(message)
     if not text and not files:
-        yield history
+        yield history, metrics
         return
 
+    max_edge = int(image_max_long_edge)
     try:
         display = chatbot_user_display(text, files)
-        api_content = build_user_content(text, files)
+        api_content = build_user_content(
+            text, files, max_long_edge=max_edge
+        )
     except (OSError, ValueError) as e:
         history = history + [[text or "(画像)", format_error(str(e))]]
-        yield history
+        yield history, metrics
         return
 
     if not api_content:
-        yield history
+        yield history, metrics
         return
 
     history = history + [[display, None]]
-    yield history
+    yield history, metrics
 
     cfg = cfg_from_inputs(
         inference_url, control_url, token, ngl, ctx, timeout_sec
@@ -480,31 +576,51 @@ def chat_respond(
                 "モデル未ロードです（llama_running=false）。"
                 "Connection からロードしてください。"
             )
-            yield history
+            yield history, format_chat_metrics(
+                vram_used_gb=st.vram_used_gb,
+                vram_total_gb=st.vram_total_gb,
+            )
             return
+        metrics = format_chat_metrics(
+            vram_used_gb=st.vram_used_gb,
+            vram_total_gb=st.vram_total_gb,
+        )
     except ControlClientError:
         pass
 
-    messages = history_to_messages(history[:-1])
+    messages = history_to_messages(history[:-1], max_long_edge=max_edge)
     messages.append(ChatMessage(role="user", content=api_content))
     backend = make_http_backend(cfg)
     acc = ""
+    tok_s: float | None = None
     try:
         for chunk in backend.chat_stream(
             messages, temperature=float(temperature)
         ):
+            if chunk.tok_s is not None:
+                tok_s = chunk.tok_s
             if chunk.text:
                 acc += chunk.text
                 history[-1][1] = acc
-                yield history
+                yield history, metrics
             if chunk.done:
                 break
         if history[-1][1] is None:
             history[-1][1] = "（空の応答）"
-            yield history
     except HttpBackendError as e:
         history[-1][1] = str(e)
-        yield history
+
+    used = total = None
+    try:
+        st2 = make_control_client(cfg).status()
+        used, total = st2.vram_used_gb, st2.vram_total_gb
+    except ControlClientError:
+        pass
+    yield history, format_chat_metrics(
+        vram_used_gb=used,
+        vram_total_gb=total,
+        tok_s=tok_s,
+    )
 
 
 def refresh_models(
@@ -550,34 +666,80 @@ def download_and_refresh(
     mmproj_filename: str,
     overwrite: bool,
 ):
-    """ダウンロード後に Dropdown を更新する。
+    """ダウンロード中は進捗をログに出し、完了後に Dropdown を更新する。
 
-    Returns
-    -------
+    Yields
+    ------
     update
         モデル Dropdown。
     update
         mmproj Dropdown。
     str
-        ログ。
+        ログ（進捗または結果）。
     """
-    models, mmprojs, msg = do_download_model(
-        inference_url,
-        control_url,
-        token,
-        ngl,
-        ctx,
-        timeout_sec,
-        model_id,
-        repo_url,
-        filename,
-        mmproj_filename=mmproj_filename,
-        overwrite=bool(overwrite),
+    mid = (model_id or "").strip()
+    url = (repo_url or "").strip()
+    fname = (filename or "").strip()
+    mmproj = (mmproj_filename or "").strip()
+    if not mid or not url or not fname:
+        yield (
+            gr.update(),
+            gr.update(),
+            format_error(
+                "タイトル（ID）・リポジトリ・LLMモデルをすべて入力してください。"
+            ),
+        )
+        return
+
+    cfg = cfg_from_inputs(
+        inference_url, control_url, token, ngl, ctx, timeout_sec
     )
-    if "ダウンロード完了" not in msg:
-        return gr.update(), gr.update(), msg
+    client = make_control_client(cfg)
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
+
+    def _worker() -> None:
+        try:
+            result["raw"] = client.download_model(
+                mid,
+                url,
+                fname,
+                mmproj_filename=mmproj or None,
+                overwrite=bool(overwrite),
+            )
+        except BaseException as e:  # noqa: BLE001
+            error["e"] = e
+
+    yield gr.update(), gr.update(), "ダウンロードを開始しました…"
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        try:
+            prog = client.download_progress()
+            yield gr.update(), gr.update(), format_download_progress(prog)
+        except ControlClientError as e:
+            yield gr.update(), gr.update(), f"進捗取得: {e}"
+        time.sleep(0.5)
+    thread.join(timeout=1)
+
+    if error:
+        err = error["e"]
+        msg = str(err) if isinstance(err, ControlClientError) else format_error(str(err))
+        try:
+            prog = client.download_progress()
+            msg = f"{format_download_progress(prog)}\n\n{msg}"
+        except ControlClientError:
+            pass
+        yield gr.update(), gr.update(), msg
+        return
+
+    models, mmprojs, list_msg = do_list_models(
+        inference_url, control_url, token, ngl, ctx, timeout_sec
+    )
+    detail = json.dumps(result.get("raw") or {}, ensure_ascii=False, indent=2)
+    msg = f"ダウンロード完了\n{detail}\n{list_msg}"
     mmproj_choices = [""] + mmprojs
-    return (
+    yield (
         gr.update(choices=models, value=(models[0] if models else None)),
         gr.update(choices=mmproj_choices, value=""),
         msg,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
 
@@ -11,6 +12,8 @@ ContentPart = dict[str, Any]
 MessageContent = Union[str, list[ContentPart]]
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+DEFAULT_IMAGE_MAX_LONG_EDGE = 1024
 
 
 def is_mmproj_name(name: str) -> bool:
@@ -46,13 +49,22 @@ def is_image_path(path: str) -> bool:
     return Path(path).suffix.lower() in _IMAGE_SUFFIXES
 
 
-def file_to_data_url(path: str) -> str:
+def file_to_data_url(
+    path: str,
+    *,
+    max_long_edge: int = DEFAULT_IMAGE_MAX_LONG_EDGE,
+) -> str:
     """画像ファイルを data URL（base64）に変換する。
+
+    長い辺が ``max_long_edge`` を超える場合のみアスペクト比を保って縮小する。
+    ``max_long_edge <= 0`` のときはリサイズしない。
 
     Parameters
     ----------
     path : str
         ローカル画像パス。
+    max_long_edge : int, default 1024
+        長い辺の上限ピクセル。0 以下で無制限。
 
     Returns
     -------
@@ -66,20 +78,72 @@ def file_to_data_url(path: str) -> str:
     ValueError
         空ファイルなど。
     """
+    raw, mime = _image_bytes_for_api(path, max_long_edge=max_long_edge)
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def _image_bytes_for_api(
+    path: str,
+    *,
+    max_long_edge: int,
+) -> tuple[bytes, str]:
+    """API 送信用の画像バイトと MIME を返す。
+
+    Returns
+    -------
+    bytes
+        画像データ。
+    str
+        MIME タイプ。
+    """
+    from PIL import Image, ImageOps
+
     p = Path(path)
     raw = p.read_bytes()
     if not raw:
         raise ValueError(f"空の画像ファイルです: {p}")
-    mime, _ = mimetypes.guess_type(str(p))
-    if not mime or not mime.startswith("image/"):
-        mime = "image/png"
-    b64 = base64.b64encode(raw).decode("ascii")
-    return f"data:{mime};base64,{b64}"
+
+    mime_guess, _ = mimetypes.guess_type(str(p))
+    if not mime_guess or not mime_guess.startswith("image/"):
+        mime_guess = "image/png"
+
+    if max_long_edge <= 0:
+        return raw, mime_guess
+
+    with Image.open(BytesIO(raw)) as im:
+        im = ImageOps.exif_transpose(im)
+        im.load()
+        w, h = im.size
+        long_edge = max(w, h)
+        if long_edge <= max_long_edge:
+            return raw, mime_guess
+
+        scale = max_long_edge / float(long_edge)
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        im = im.resize(new_size, Image.Resampling.LANCZOS)
+
+        has_alpha = im.mode in ("RGBA", "LA") or (
+            im.mode == "P" and "transparency" in im.info
+        )
+        buf = BytesIO()
+        if has_alpha:
+            if im.mode != "RGBA":
+                im = im.convert("RGBA")
+            im.save(buf, format="PNG")
+            return buf.getvalue(), "image/png"
+
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        im.save(buf, format="JPEG", quality=85, optimize=True)
+        return buf.getvalue(), "image/jpeg"
 
 
 def build_user_content(
     text: str,
     image_paths: Optional[Sequence[str]] = None,
+    *,
+    max_long_edge: int = DEFAULT_IMAGE_MAX_LONG_EDGE,
 ) -> MessageContent:
     """テキストと画像パスから OpenAI 互換 content を組み立てる。
 
@@ -92,6 +156,8 @@ def build_user_content(
         ユーザ文言。
     image_paths : sequence of str or None
         画像ファイルパス。
+    max_long_edge : int, default 1024
+        画像の長い辺の上限（送信時のみ縮小）。
 
     Returns
     -------
@@ -110,7 +176,9 @@ def build_user_content(
         parts.append(
             {
                 "type": "image_url",
-                "image_url": {"url": file_to_data_url(path)},
+                "image_url": {
+                    "url": file_to_data_url(path, max_long_edge=max_long_edge)
+                },
             }
         )
     return parts

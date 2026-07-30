@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
@@ -16,6 +17,54 @@ from urllib.request import Request, urlopen
 
 CATALOG_NAME = "models.json"
 CATALOG_VERSION = 1
+
+_progress_lock = threading.Lock()
+_download_progress: dict[str, Any] = {
+    "active": False,
+    "filename": "",
+    "label": "",
+    "downloaded": 0,
+    "total": None,
+    "percent": None,
+    "phase": "idle",
+    "message": "",
+    "error": None,
+}
+
+
+def get_download_progress() -> dict[str, Any]:
+    """現在のダウンロード進捗のスナップショットを返す。"""
+    with _progress_lock:
+        return dict(_download_progress)
+
+
+def _set_download_progress(**kwargs: Any) -> None:
+    """進捗辞書を更新する。"""
+    with _progress_lock:
+        _download_progress.update(kwargs)
+        downloaded = int(_download_progress.get("downloaded") or 0)
+        total = _download_progress.get("total")
+        if isinstance(total, (int, float)) and total > 0:
+            _download_progress["percent"] = round(
+                100.0 * downloaded / float(total), 1
+            )
+        else:
+            _download_progress["percent"] = None
+
+
+def reset_download_progress() -> None:
+    """進捗を idle に戻す。"""
+    _set_download_progress(
+        active=False,
+        filename="",
+        label="",
+        downloaded=0,
+        total=None,
+        percent=None,
+        phase="idle",
+        message="",
+        error=None,
+    )
 
 
 class CatalogError(Exception):
@@ -358,41 +407,88 @@ def download_model(
                 status=409,
             )
 
-    dl_url = _download_file(
-        dest, resolve_download_url(repo, fname), timeout_sec=timeout_sec
-    )
-    entry = upsert_entry(
-        models_dir,
-        model_id=mid,
-        url=repo,
+    _set_download_progress(
+        active=True,
         filename=fname,
-        overwrite=True,
+        label=f"LLM: {fname}",
+        downloaded=0,
+        total=None,
+        percent=None,
+        phase="downloading",
+        message=f"ダウンロード開始: {fname}",
+        error=None,
     )
-    result: dict[str, Any] = {
-        "ok": True,
-        "model": entry,
-        "path": str(dest),
-        "download_url": dl_url,
-    }
-
-    if mmproj_fname and mmproj_dest is not None and mmproj_id is not None:
-        mm_dl = _download_file(
-            mmproj_dest,
-            resolve_download_url(repo, mmproj_fname),
+    try:
+        dl_url = _download_file(
+            dest,
+            resolve_download_url(repo, fname),
             timeout_sec=timeout_sec,
+            label=f"LLM: {fname}",
         )
-        mm_entry = upsert_entry(
+        _set_download_progress(
+            phase="registering",
+            message=f"カタログ登録中: {fname}",
+        )
+        entry = upsert_entry(
             models_dir,
-            model_id=mmproj_id,
+            model_id=mid,
             url=repo,
-            filename=mmproj_fname,
+            filename=fname,
             overwrite=True,
         )
-        result["mmproj"] = mm_entry
-        result["mmproj_path"] = str(mmproj_dest)
-        result["mmproj_download_url"] = mm_dl
+        result: dict[str, Any] = {
+            "ok": True,
+            "model": entry,
+            "path": str(dest),
+            "download_url": dl_url,
+        }
 
-    return result
+        if mmproj_fname and mmproj_dest is not None and mmproj_id is not None:
+            _set_download_progress(
+                filename=mmproj_fname,
+                label=f"Vision: {mmproj_fname}",
+                downloaded=0,
+                total=None,
+                percent=None,
+                phase="downloading",
+                message=f"ダウンロード開始: {mmproj_fname}",
+            )
+            mm_dl = _download_file(
+                mmproj_dest,
+                resolve_download_url(repo, mmproj_fname),
+                timeout_sec=timeout_sec,
+                label=f"Vision: {mmproj_fname}",
+            )
+            _set_download_progress(
+                phase="registering",
+                message=f"カタログ登録中: {mmproj_fname}",
+            )
+            mm_entry = upsert_entry(
+                models_dir,
+                model_id=mmproj_id,
+                url=repo,
+                filename=mmproj_fname,
+                overwrite=True,
+            )
+            result["mmproj"] = mm_entry
+            result["mmproj_path"] = str(mmproj_dest)
+            result["mmproj_download_url"] = mm_dl
+
+        _set_download_progress(
+            active=False,
+            phase="done",
+            message="ダウンロード完了",
+            percent=100.0,
+        )
+        return result
+    except Exception as e:
+        _set_download_progress(
+            active=False,
+            phase="error",
+            error=str(e),
+            message=f"失敗: {e}",
+        )
+        raise
 
 
 def delete_model(
@@ -463,8 +559,20 @@ def _download_file(
     dl_url: str,
     *,
     timeout_sec: float,
+    label: str = "",
 ) -> str:
     """URL から dest へファイルを保存する。
+
+    Parameters
+    ----------
+    dest : pathlib.Path
+        保存先。
+    dl_url : str
+        ダウンロード URL。
+    timeout_sec : float
+        タイムアウト秒。
+    label : str, default ""
+        進捗表示用ラベル。
 
     Returns
     -------
@@ -472,18 +580,52 @@ def _download_file(
         実際に使ったダウンロード URL。
     """
     tmp = dest.with_suffix(dest.suffix + ".partial")
+    display = label or dest.name
     try:
         req = Request(
             dl_url,
             headers={"User-Agent": "llamacpp-chat2-control/0.1"},
         )
         with urlopen(req, timeout=timeout_sec) as resp:
+            total: Optional[int] = None
+            cl = resp.headers.get("Content-Length")
+            if cl:
+                try:
+                    total = int(cl)
+                except ValueError:
+                    total = None
+            _set_download_progress(
+                active=True,
+                filename=dest.name,
+                label=display,
+                downloaded=0,
+                total=total,
+                phase="downloading",
+                message=f"ダウンロード中: {display}",
+                error=None,
+            )
+            downloaded = 0
+            last_emit = 0
             with open(tmp, "wb") as out:
                 while True:
                     chunk = resp.read(1024 * 1024)
                     if not chunk:
                         break
                     out.write(chunk)
+                    downloaded += len(chunk)
+                    # 1 MiB ごと、または完了時に更新
+                    if downloaded - last_emit >= 1024 * 1024:
+                        _set_download_progress(
+                            downloaded=downloaded,
+                            total=total,
+                            message=f"ダウンロード中: {display}",
+                        )
+                        last_emit = downloaded
+            _set_download_progress(
+                downloaded=downloaded,
+                total=total if total is not None else downloaded,
+                message=f"保存中: {display}",
+            )
         tmp.replace(dest)
     except HTTPError as e:
         _remove_quiet(tmp)

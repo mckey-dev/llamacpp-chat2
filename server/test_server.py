@@ -23,16 +23,68 @@ from server.models_catalog import (  # noqa: E402
     CatalogError,
     delete_model,
     download_model,
+    get_download_progress,
     list_models_with_status,
     normalize_repo_url,
     resolve_download_url,
     save_catalog,
     upsert_entry,
+    _set_download_progress,
+    reset_download_progress,
 )
-from server.process_manager import ProcessManager  # noqa: E402
+from server.process_manager import ProcessManager, query_vram_gb  # noqa: E402
 
 FAKE_LLAMA = Path(__file__).resolve().parent / "test_support" / "fake_llama_server.py"
 TOKEN = "test-token"
+
+
+class VramQueryTests(unittest.TestCase):
+    """nvidia-smi → GB 換算。"""
+
+    def test_query_vram_gb_from_mib(self) -> None:
+        class _Proc:
+            returncode = 0
+            stdout = "8234, 24564\n"
+
+        def runner(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            return _Proc()
+
+        got = query_vram_gb(smi_runner=runner)
+        self.assertIsNotNone(got)
+        assert got is not None
+        self.assertAlmostEqual(8234 / 1024.0, got[0], places=3)
+        self.assertAlmostEqual(24564 / 1024.0, got[1], places=3)
+        self.assertAlmostEqual(8.0, round(got[0], 1))
+        self.assertAlmostEqual(24.0, round(got[1], 1))
+
+    def test_query_vram_gb_failure(self) -> None:
+        def runner(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            raise FileNotFoundError("nvidia-smi")
+
+        self.assertIsNone(query_vram_gb(smi_runner=runner))
+
+
+class DownloadProgressTests(unittest.TestCase):
+    """ダウンロード進捗ストア。"""
+
+    def tearDown(self) -> None:
+        reset_download_progress()
+
+    def test_set_and_get_percent(self) -> None:
+        reset_download_progress()
+        _set_download_progress(
+            active=True,
+            filename="a.gguf",
+            label="LLM: a.gguf",
+            downloaded=512,
+            total=1024,
+            phase="downloading",
+            message="downloading",
+        )
+        prog = get_download_progress()
+        self.assertTrue(prog["active"])
+        self.assertEqual(50.0, prog["percent"])
+        self.assertEqual("a.gguf", prog["filename"])
 
 
 class ModelsCatalogTests(unittest.TestCase):
@@ -98,7 +150,7 @@ class ModelsCatalogTests(unittest.TestCase):
     def test_download_with_mmproj(self) -> None:
         from unittest import mock
 
-        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float) -> str:
+        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float, **kwargs: object) -> str:
             dest.write_bytes(b"GGUF")
             return dl_url
 
@@ -320,6 +372,27 @@ class ControlApiHttpTests(unittest.TestCase):
         self.assertEqual(1, len(body["models"]))
         self.assertFalse(body["models"][0]["missing"])
 
+    def test_download_progress_endpoint(self) -> None:
+        _set_download_progress(
+            active=True,
+            filename="x.gguf",
+            label="LLM: x.gguf",
+            downloaded=100,
+            total=200,
+            phase="downloading",
+            message="test",
+        )
+        try:
+            code, body = self._request(
+                "GET", "/v1/control/models/download/progress"
+            )
+            self.assertEqual(200, code)
+            self.assertTrue(body["ok"])
+            self.assertTrue(body["active"])
+            self.assertEqual(50.0, body["percent"])
+        finally:
+            reset_download_progress()
+
     def test_load_unload_via_http(self) -> None:
         original = ProcessManager._build_command
 
@@ -346,7 +419,7 @@ class ControlApiHttpTests(unittest.TestCase):
     def test_download_with_mmproj_via_http(self) -> None:
         from unittest import mock
 
-        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float) -> str:
+        def fake_download(dest: Path, dl_url: str, *, timeout_sec: float, **kwargs: object) -> str:
             dest.write_bytes(b"GGUF")
             return dl_url
 

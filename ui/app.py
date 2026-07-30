@@ -248,6 +248,12 @@ def build_ui(config_path: Path | None = None) -> gr.Blocks:
 
             with gr.Tab("Chat"):
                 chatbot = gr.Chatbot(label="チャット", height=480)
+                metrics = gr.Textbox(
+                    label="メトリクス",
+                    value="VRAM — · — tok/s",
+                    interactive=False,
+                    lines=1,
+                )
                 msg = gr.MultimodalTextbox(
                     label="メッセージ（画像は Vision 対応モデル向け）",
                     file_types=["image"],
@@ -257,27 +263,55 @@ def build_ui(config_path: Path | None = None) -> gr.Blocks:
                 temperature = gr.Slider(
                     0.0, 2.0, value=0.7, step=0.05, label="temperature"
                 )
+                image_max_long_edge = gr.Number(
+                    label="画像 長辺上限 (px)",
+                    info="長い辺がこの値を超える画像は送信時に縮小（0 以下で無制限）",
+                    value=cfg.image_max_long_edge,
+                    precision=0,
+                )
                 with gr.Row():
                     btn_send = gr.Button("送信", variant="primary")
                     btn_clear = gr.Button("クリア")
 
                 def send_wrap(
-                    message, history, inf, ctl, tok, ngl_v, ctx_v, to, temp
+                    message,
+                    history,
+                    inf,
+                    ctl,
+                    tok,
+                    ngl_v,
+                    ctx_v,
+                    to,
+                    temp,
+                    max_edge,
                 ):
                     """チャット送信ラッパ。"""
                     yield from C.chat_respond(
-                        message, history, inf, ctl, tok, ngl_v, ctx_v, to, temp
+                        message,
+                        history,
+                        inf,
+                        ctl,
+                        tok,
+                        ngl_v,
+                        ctx_v,
+                        to,
+                        temp,
+                        image_max_long_edge=max_edge,
                     )
 
                 btn_send.click(
                     fn=send_wrap,
-                    inputs=[msg, chatbot] + conn_inputs + [temperature],
-                    outputs=chatbot,
+                    inputs=[msg, chatbot]
+                    + conn_inputs
+                    + [temperature, image_max_long_edge],
+                    outputs=[chatbot, metrics],
                 ).then(C.empty_multimodal, None, msg)
                 msg.submit(
                     fn=send_wrap,
-                    inputs=[msg, chatbot] + conn_inputs + [temperature],
-                    outputs=chatbot,
+                    inputs=[msg, chatbot]
+                    + conn_inputs
+                    + [temperature, image_max_long_edge],
+                    outputs=[chatbot, metrics],
                 ).then(C.empty_multimodal, None, msg)
                 btn_clear.click(fn=lambda: [], outputs=chatbot)
 
