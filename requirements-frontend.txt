@@ -1,0 +1,12 @@
+# Frontend only. No CUDA / llama native packages.
+gradio==4.40.0
+# Gradio 4.40 imports HfFolder; removed in huggingface_hub 1.x
+huggingface_hub>=0.19.3,<1.0
+# pydantic 2.11+ emits additionalProperties: true (bool) and crashes
+# gradio_client 1.2 api_info (MultimodalTextbox / FileData)
+pydantic>=2.7.3,<2.11
+# FastAPI 0.113+ breaks Gradio 4.40 (Request in PredictBody schema)
+# Starlette 1.0 breaks TemplateResponse(name, context)
+fastapi>=0.111.0,<0.113.0
+starlette>=0.37.2,<0.39.0
+httpx>=0.27.0,<0.28.0

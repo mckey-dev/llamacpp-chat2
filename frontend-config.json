@@ -1,0 +1,9 @@
+{
+  "inference_base_url": "http://127.0.0.1:8080",
+  "control_base_url": "http://127.0.0.1:8090",
+  "control_token": "llamacpp-chat2",
+  "ngl": 99,
+  "ctx": 8192,
+  "timeout_sec": 60.0,
+  "stream_timeout_sec": 300.0
+}

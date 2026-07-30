@@ -1,0 +1,2 @@
+# Server control API: Python standard library only.
+# No extra pip packages.
